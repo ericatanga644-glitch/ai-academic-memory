@@ -194,7 +194,7 @@ def smtp_send(recipient, subject, body, settings):
             client.send_message(msg)
 
 def valid_email(value):
-    return bool(re.fullmatch(r"[^\\s@]+@[^\\s@]+\\.[^\\s@]+", value))
+    return bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value))
 
 def hash_password(password, salt=None):
     salt = salt or secrets.token_bytes(16)
