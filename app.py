@@ -174,6 +174,19 @@ def phase6_initialize():
             PRIMARY KEY(user_id, announcement_id, event_type)
         )""")
 
+def smtp_settings():
+    return (secret('SMTP_HOST'), int(secret('SMTP_PORT', '587')),
+            secret('SMTP_USERNAME'), secret('SMTP_PASSWORD'), secret('SMTP_SENDER'))
+
+def email_ready():
+    return all((secret('SMTP_HOST'), secret('SMTP_USERNAME'), secret('SMTP_PASSWORD'), secret('SMTP_SENDER')))
+
+def notification_initialize():
+    with connect() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS notification_reads (
+            user_id BIGINT NOT NULL, announcement_id BIGINT NOT NULL,
+            PRIMARY KEY (user_id, announcement_id))""")
+
 def smtp_send(recipient, subject, body, settings):
     host, port, username, password, sender = settings
     if not all([host, username, password, sender]):
@@ -194,7 +207,7 @@ def smtp_send(recipient, subject, body, settings):
             client.send_message(msg)
 
 def valid_email(value):
-    return bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value))
+    return bool(re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', value))
 
 def hash_password(password, salt=None):
     salt = salt or secrets.token_bytes(16)
@@ -214,9 +227,20 @@ def get_memberships(user_id):
 
 phase4_initialize()
 phase6_initialize()
+notification_initialize()
 st.set_page_config(page_title='AI Academic Memory · Classroom Pilot', page_icon='🧠', layout='wide')
-st.title('🧠 AI Academic Memory')
-st.caption('KNUST classroom pilot · Shared academic announcements and deadline reminders')
+st.markdown('''<style>
+.stApp {background: #f5f7fc; color: #14213b;}
+[data-testid="stSidebar"] {background: #101d38;}
+[data-testid="stSidebar"] * {color: #f8fafc;}
+.block-container {max-width: 1150px; padding-top: 1.6rem;}
+[data-testid="stMetric"] {background: white; border: 1px solid #e2e8f0; padding: 1rem; border-radius: 14px;}
+.stButton button[kind="primary"] {background: #142f60; border-radius: 10px;}
+[data-testid="stVerticalBlockBorderWrapper"] {border-radius: 14px;}
+@media(max-width: 600px) {.block-container {padding: .8rem;}}
+</style>''', unsafe_allow_html=True)
+st.title('🎓 AI Academic Memory')
+st.caption('Your campus, your classes, your academic life — all in one place.')
 
 if 'user_id' not in st.session_state:
     st.subheader('Welcome to Academic Memory')
@@ -286,8 +310,8 @@ with st.sidebar:
     st.caption('API calls may incur charges. Your key is only kept in the current Streamlit session.')
 
 st.divider()
-st.subheader('📧 Email notification settings — Phase 6')
-st.caption('Save your preferred personal or university email. No emails will be sent during this pilot.')
+st.subheader('📧 Email preferences')
+st.caption('Choose your email and verify it before enabling automatic messages. Email delivery requires organizer setup.')
 with connect() as c:
     ep = c.execute('SELECT * FROM email_preferences WHERE user_id=?',(user['id'],)).fetchone()
 saved_email = ep['notification_email'] if ep else ''
@@ -311,8 +335,38 @@ with st.expander('Set up my notification email', expanded=not bool(ep and ep['ve
                     (user['id'],chosen_email,int(bool(ep and ep['verified'] and same)),int(announcement_opt),int(reminder_opt)))
             st.success('Preferences saved.' + (' Email verification retained.' if same and ep and ep['verified'] else ' Verify this address next.'))
             st.rerun()
-    st.caption('Email verification will be enabled after the classroom pilot. Do not enter email passwords here.')
-st.info('Email delivery and automatic scheduled notifications are not yet enabled for the classroom pilot. In-app reminders work now.')
+    if email_ready() and ep and ep['notification_email'] and not ep['verified']:
+        if st.button('Send verification code'):
+            code = f'{secrets.randbelow(1000000):06d}'
+            token_hash = hashlib.sha256(code.encode()).hexdigest()
+            expiry = (datetime.utcnow() + timedelta(minutes=15)).isoformat()
+            try:
+                smtp_send(ep['notification_email'], 'Verify AI Academic Memory email',
+                          f'Your verification code is {code}. It expires in 15 minutes.\nIf you did not request this, ignore this email.', smtp_settings())
+                with connect() as c:
+                    c.execute('UPDATE email_preferences SET verification_hash=?,verification_expires=? WHERE user_id=?',
+                              (token_hash, expiry, user['id']))
+                st.success('Verification code sent. Check your inbox.')
+            except Exception:
+                st.error('Could not send verification email. Contact the organizer.')
+        with st.form('verify_email'):
+            entered_code = st.text_input('Six-digit email verification code', max_chars=6)
+            verify = st.form_submit_button('Verify email')
+        if verify:
+            with connect() as c:
+                row = c.execute('SELECT verification_hash,verification_expires FROM email_preferences WHERE user_id=?',(user['id'],)).fetchone()
+                ok = bool(row and row['verification_hash'] and row['verification_expires']
+                    and datetime.fromisoformat(row['verification_expires']) > datetime.utcnow()
+                    and hmac.compare_digest(hashlib.sha256(entered_code.encode()).hexdigest(),row['verification_hash']))
+                if ok:
+                    c.execute('UPDATE email_preferences SET verified=1,verification_hash=NULL,verification_expires=NULL WHERE user_id=?',(user['id'],))
+            if ok: st.success('Email verified!'); st.rerun()
+            else: st.error('Invalid or expired code.')
+    elif ep and ep['verified']:
+        st.success('Email address verified.')
+    else:
+        st.caption('Email verification is unavailable until the organizer configures SMTP.')
+st.info('In-app notifications work now. Automatic emails require verified addresses and the scheduled worker described in README.')
 
 memberships = get_memberships(user['id'])
 st.subheader('🏫 Your classes')
@@ -359,6 +413,30 @@ active=memberships[selected]
 class_id=active['id']
 is_rep=active['role']=='representative'
 st.caption('Your role: '+('Class representative' if is_rep else 'Student'))
+records=all_records(class_id)
+with connect() as c:
+    read_ids={r['announcement_id'] for r in c.execute('SELECT announcement_id FROM notification_reads WHERE user_id=?',(user['id'],)).fetchall()}
+unread=[r for r in records if r['id'] not in read_ids]
+future=[r for r in records if r['deadline'] and r['deadline'] >= date.today().isoformat()]
+st.markdown(f'### Welcome back, {user["name"].split()[0]} 👋')
+a,b,c=st.columns(3)
+a.metric('📢 Announcements',len(records))
+b.metric('🔔 Unread updates',len(unread))
+c.metric('📅 Upcoming deadlines',len(future))
+with st.expander(f'🔔 Notification centre · {len(unread)} unread',expanded=bool(unread)):
+    if not unread: st.success('You are all caught up!')
+    for r in unread[:15]:
+        with st.container(border=True):
+            st.markdown(f'**{r["course"]} · {r["category"]}**')
+            st.write(r['message'])
+            if st.button('Mark as read',key=f'notif_{r["id"]}'):
+                with connect() as conn:
+                    conn.execute('INSERT INTO notification_reads(user_id,announcement_id) VALUES(?,?) ON CONFLICT DO NOTHING',(user['id'],r['id']))
+                st.rerun()
+with st.expander('📅 Academic calendar'):
+    if not future: st.info('No upcoming dated announcements.')
+    for r in sorted(future,key=lambda x:x['deadline']):
+        st.write(f'**{r["deadline"]}** · {r["course"]} · {r["category"]}')
 if is_rep:
     st.code(active['join_code'], language=None)
     st.caption('Share this join code only with students in your class.')
@@ -422,7 +500,7 @@ for item in links:
 
 st.divider()
 st.subheader('🔔 My deadline reminders')
-st.caption('In-app reminders work now. Scheduled email reminders require a background worker in a later deployment.')
+st.caption('In-app reminders are available. Automatic emails require the configured scheduled worker.')
 with connect() as c:
     c.execute("CREATE TABLE IF NOT EXISTS reminder_preferences (user_id BIGINT PRIMARY KEY, days_ahead INTEGER NOT NULL DEFAULT 7)")
     c.execute("CREATE TABLE IF NOT EXISTS reminder_dismissals (user_id BIGINT NOT NULL, announcement_id BIGINT NOT NULL, PRIMARY KEY(user_id, announcement_id))")
@@ -460,7 +538,7 @@ with st.expander('Manage dismissed reminders'):
         with connect() as c: c.execute('DELETE FROM reminder_dismissals WHERE user_id=?',(user['id'],))
         st.rerun()
 st.divider()
-st.subheader('📚 Shared academic dashboard')
+st.subheader('📚 Announcements & search')
 records=all_records(class_id)
 query=st.text_input('Search this class',placeholder='CHE 251, assignment, deadline...')
 filtered=[r for r in records if query.lower() in ' '.join(str(r[k] or '') for k in ('course','category','deadline','message')).lower()]
@@ -472,7 +550,7 @@ for r in filtered:
 if not filtered: st.info('No announcements found for this class.')
 
 st.divider()
-st.subheader('💬 Ask your class academic memory')
+st.subheader('🤖 Ask your AI academic assistant')
 question=st.text_input('Ask about class announcements',placeholder='When is CHE 251 assignment due?')
 if st.button('Search class memory'):
     if not question.strip(): st.warning('Enter a question first.')
