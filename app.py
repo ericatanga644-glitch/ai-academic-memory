@@ -65,6 +65,33 @@ def initialize():
         c.execute('''CREATE TABLE IF NOT EXISTS announcements (id BIGSERIAL PRIMARY KEY, course TEXT NOT NULL, category TEXT NOT NULL, deadline TEXT, message TEXT NOT NULL, created_at TEXT NOT NULL, class_id BIGINT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS memory_links (id BIGSERIAL PRIMARY KEY, older_id BIGINT NOT NULL, newer_id BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'Needs review', UNIQUE(older_id, newer_id))''')
 
+def materials_initialize():
+    """Persistent, class-scoped material storage for the classroom pilot."""
+    with connect() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS academic_materials (
+            id BIGSERIAL PRIMARY KEY,
+            class_id BIGINT NOT NULL REFERENCES classes(id),
+            uploader_id BIGINT NOT NULL REFERENCES users(id),
+            course TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            filename TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            file_size BIGINT NOT NULL,
+            content BYTEA NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_materials_class_course ON academic_materials(class_id,course)")
+
+MAX_MATERIAL_BYTES = 8 * 1024 * 1024
+ALLOWED_MATERIALS = {'.pdf':'application/pdf', '.pptx':'application/vnd.openxmlformats-officedocument.presentationml.presentation', '.docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.txt':'text/plain'}
+def material_is_valid(filename, data):
+    ext = Path(filename).suffix.lower()
+    if ext not in ALLOWED_MATERIALS or not data or len(data) > MAX_MATERIAL_BYTES: return False
+    if ext == '.pdf': return data.startswith(b'%PDF-')
+    if ext in ('.pptx','.docx'): return data.startswith(b'PK\x03\x04')
+    return True
+
 def extract(message):
     m = re.search(r'\b[A-Za-z]{2,4}\s?\d{3}\b', message)
     course = re.sub(r'\s+', ' ', m.group()).upper() if m else 'Unspecified'
@@ -228,19 +255,29 @@ def get_memberships(user_id):
 phase4_initialize()
 phase6_initialize()
 notification_initialize()
+materials_initialize()
 st.set_page_config(page_title='AI Academic Memory · Classroom Pilot', page_icon='🧠', layout='wide')
 st.markdown('''<style>
-.stApp {background: #f5f7fc; color: #14213b;}
-[data-testid="stSidebar"] {background: #101d38;}
-[data-testid="stSidebar"] * {color: #f8fafc;}
-.block-container {max-width: 1150px; padding-top: 1.6rem;}
-[data-testid="stMetric"] {background: white; border: 1px solid #e2e8f0; padding: 1rem; border-radius: 14px;}
-.stButton button[kind="primary"] {background: #142f60; border-radius: 10px;}
-[data-testid="stVerticalBlockBorderWrapper"] {border-radius: 14px;}
-@media(max-width: 600px) {.block-container {padding: .8rem;}}
+:root {--gold:#c59a38;--ink:#101827;}
+.stApp {background:linear-gradient(155deg,#f7f8fb 0%,#fff 60%,#fbf6e9 100%);color:#172033;}
+[data-testid="stSidebar"] {background:linear-gradient(175deg,#121820,#222b35);}
+[data-testid="stSidebar"] * {color:#f5f0e5!important;}
+[data-testid="stSidebar"] button {border:1px solid #c59a38!important;}
+.block-container {max-width:1200px;padding-top:1.6rem;padding-bottom:3rem;}
+h1,h2,h3 {letter-spacing:-.035em;color:#192435;}
+h1 {font-weight:850!important;}
+h2,h3 {font-weight:750!important;}
+[data-testid="stMetric"] {background:#fff;border:1px solid #e9e7e0;border-top:3px solid #c59a38;border-radius:16px;padding:18px;box-shadow:0 6px 25px #17203309;}
+[data-testid="stExpander"], [data-testid="stForm"], [data-testid="stVerticalBlockBorderWrapper"] {border-radius:14px!important;}
+.stButton button[kind="primary"],button[data-testid="stBaseButton-primary"] {background:#bb8d2d!important;border-color:#bb8d2d!important;color:#fff!important;border-radius:10px!important;}
+.stButton button {border-radius:10px;}
+[data-testid="stTabs"] button[aria-selected="true"] {color:#ae8129!important;border-bottom-color:#ae8129!important;}
+.hero-gold {padding:24px 28px;border-radius:20px;background:linear-gradient(105deg,#101820,#28313c);color:white;margin-bottom:22px;box-shadow:0 12px 30px #10182025;}
+.hero-gold strong {color:#edc66e;}
+.hero-gold p {color:#e3e6eb;margin:8px 0 0;}
 </style>''', unsafe_allow_html=True)
 st.title('🎓 AI Academic Memory')
-st.caption('Your campus, your classes, your academic life — all in one place.')
+st.markdown('<div class="hero-gold"><strong>YOUR CLASS. YOUR KNOWLEDGE.</strong><p>Announcements • Academic materials • AI search • Deadline reminders</p></div>', unsafe_allow_html=True)
 
 if 'user_id' not in st.session_state:
     st.subheader('Welcome to Academic Memory')
@@ -537,6 +574,62 @@ with st.expander('Manage dismissed reminders'):
     if st.button('Restore all my dismissed reminders',key=f'restore_{user["id"]}_{class_id}'):
         with connect() as c: c.execute('DELETE FROM reminder_dismissals WHERE user_id=?',(user['id'],))
         st.rerun()
+st.divider()
+st.subheader('📚 Academic Materials Library')
+st.caption('Lecture slides, course notes and past questions — available to members of this class.')
+if is_rep:
+    with st.expander('➕ Upload course material', expanded=False):
+        with st.form('upload_academic_material',clear_on_submit=True):
+            mat_course=st.text_input('Course code',placeholder='CHE 251',max_chars=30)
+            mat_title=st.text_input('Material title',placeholder='Thermodynamics — Lecture 1',max_chars=160)
+            mat_desc=st.text_area('Description / topic keywords',max_chars=1000)
+            mat_file=st.file_uploader('Choose a PDF, PowerPoint, Word document or TXT file (maximum 8 MB)',type=['pdf','pptx','docx','txt'])
+            mat_submit=st.form_submit_button('Upload material',type='primary')
+        if mat_submit:
+            if not mat_course.strip() or not mat_title.strip() or mat_file is None:
+                st.error('Enter the course, title and select a file.')
+            else:
+                data=mat_file.getvalue()
+                if not material_is_valid(mat_file.name,data):
+                    st.error('Invalid file format or file exceeds 8 MB. Use a genuine PDF, PPTX, DOCX or TXT file.')
+                else:
+                    ext=Path(mat_file.name).suffix.lower()
+                    try:
+                        with connect() as c:
+                            c.execute('''INSERT INTO academic_materials(class_id,uploader_id,course,title,description,filename,mime_type,file_size,content)
+                                VALUES(?,?,?,?,?,?,?,?,?)''',(class_id,user['id'],mat_course.strip().upper(),mat_title.strip(),mat_desc.strip(),Path(mat_file.name).name[:220],ALLOWED_MATERIALS[ext],len(data),data))
+                        st.success('Material uploaded and saved to the production database.')
+                        st.rerun()
+                    except Exception:
+                        st.error('Upload failed. Please retry; no existing announcements were changed.')
+mat_query=st.text_input('Find materials',placeholder='Search by course, title or topic…',key=f'materials_search_{class_id}')
+with connect() as c:
+    material_rows=c.execute('''SELECT id,course,title,description,filename,mime_type,file_size,created_at,uploader_id
+        FROM academic_materials WHERE class_id=? AND
+        (LOWER(course) LIKE ? OR LOWER(title) LIKE ? OR LOWER(description) LIKE ? OR LOWER(filename) LIKE ?)
+        ORDER BY created_at DESC LIMIT 100''',(class_id,*(['%'+mat_query.lower().strip()+'%']*4))).fetchall()
+st.caption(f'{len(material_rows)} matching materials · Maximum 100 displayed')
+for mat in material_rows:
+    with st.container(border=True):
+        st.markdown(f'**{mat["course"]} · {mat["title"]}**')
+        if mat['description']: st.caption(mat['description'])
+        st.caption(f'{mat["filename"]} · {mat["file_size"]/1024/1024:.2f} MB')
+        left,right=st.columns([4,1])
+        with left:
+            if st.button('Prepare download',key=f'mat_prepare_{mat["id"]}'):
+                st.session_state[f'mat_ready_{mat["id"]}']=True
+        with right:
+            if is_rep and st.button('Delete',key=f'mat_delete_{mat["id"]}'):
+                with connect() as c:
+                    c.execute('DELETE FROM academic_materials WHERE id=? AND class_id=?',(mat['id'],class_id))
+                st.session_state.pop(f'mat_ready_{mat["id"]}',None)
+                st.rerun()
+        if st.session_state.get(f'mat_ready_{mat["id"]}'):
+            with connect() as c:
+                full=c.execute('SELECT filename,mime_type,content FROM academic_materials WHERE id=? AND class_id=?',(mat['id'],class_id)).fetchone()
+            if full:
+                st.download_button('⬇ Download '+full['filename'],data=bytes(full['content']),file_name=full['filename'],mime=full['mime_type'],key=f'mat_download_{mat["id"]}')
+if not material_rows: st.info('No matching materials yet. Class representatives can upload the first resource.')
 st.divider()
 st.subheader('📚 Announcements & search')
 records=all_records(class_id)
