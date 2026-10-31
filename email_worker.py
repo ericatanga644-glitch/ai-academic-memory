@@ -46,6 +46,7 @@ def main():
                     JOIN email_preferences p ON p.user_id=u.id
                     JOIN announcements a ON a.class_id=m.class_id
                     WHERE p.verified=1 AND p.notification_email IS NOT NULL
+                    AND a.deleted_at IS NULL
                     AND (p.announcements_enabled=1 OR p.reminders_enabled=1)
                     ORDER BY a.id DESC''')
                 rows=cur.fetchall()

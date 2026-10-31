@@ -67,7 +67,24 @@ def connect(): return DBConn()
 def initialize():
     with connect() as c:
         c.execute('''CREATE TABLE IF NOT EXISTS announcements (id BIGSERIAL PRIMARY KEY, course TEXT NOT NULL, category TEXT NOT NULL, deadline TEXT, message TEXT NOT NULL, created_at TEXT NOT NULL, class_id BIGINT)''')
+        c.execute('ALTER TABLE announcements ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ')
+        c.execute('ALTER TABLE announcements ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ')
+        c.execute('ALTER TABLE announcements ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT FALSE')
+        c.execute('''CREATE TABLE IF NOT EXISTS announcement_audit (id BIGSERIAL PRIMARY KEY, announcement_id BIGINT NOT NULL, class_id BIGINT NOT NULL, actor_id BIGINT NOT NULL, action TEXT NOT NULL, old_values TEXT, new_values TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
         c.execute('''CREATE TABLE IF NOT EXISTS memory_links (id BIGSERIAL PRIMARY KEY, older_id BIGINT NOT NULL, newer_id BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'Needs review', UNIQUE(older_id, newer_id))''')
+
+def premium_initialize():
+    """Additive schema: never drops existing student or academic data."""
+    with connect() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS student_tasks (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, class_id BIGINT NOT NULL, title TEXT NOT NULL, due_date TEXT, completed BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        c.execute("""CREATE TABLE IF NOT EXISTS announcement_bookmarks (user_id BIGINT NOT NULL, announcement_id BIGINT NOT NULL, PRIMARY KEY(user_id,announcement_id))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS class_timetable (id BIGSERIAL PRIMARY KEY, class_id BIGINT NOT NULL, course TEXT NOT NULL, weekday INTEGER NOT NULL CHECK(weekday BETWEEN 0 AND 6), start_time TEXT NOT NULL, end_time TEXT NOT NULL, venue TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', created_by BIGINT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_class ON student_tasks(user_id,class_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_timetable_class ON class_timetable(class_id,weekday)")
+
+def safe_date(value):
+    if not value: return None
+    return date.fromisoformat(str(value)).isoformat()
 
 def materials_initialize():
     """Persistent, class-scoped material storage for the classroom pilot."""
@@ -206,13 +223,13 @@ def candidate_links(course, category, deadline, class_id):
     if course == 'Unspecified' or category == 'Announcement':
         return []
     with connect() as c:
-        previous = c.execute('SELECT * FROM announcements WHERE course=? AND category=? AND class_id=? ORDER BY id DESC LIMIT 15', (course, category, class_id)).fetchall()
+        previous = c.execute('SELECT * FROM announcements WHERE course=? AND category=? AND class_id=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 15', (course, category, class_id)).fetchall()
     # Same course/category is only a POSSIBLE relationship, not proof of the same event.
     return [r for r in previous if deadline and r['deadline'] and deadline != r['deadline']]
 
 def all_records(class_id):
     with connect() as c:
-        return c.execute('SELECT * FROM announcements WHERE class_id=? ORDER BY id DESC', (class_id,)).fetchall()
+        return c.execute('SELECT * FROM announcements WHERE class_id=? AND deleted_at IS NULL ORDER BY pinned DESC, id DESC', (class_id,)).fetchall()
 
 
 def phase4_initialize():
@@ -356,6 +373,7 @@ phase4_initialize()
 phase6_initialize()
 notification_initialize()
 materials_initialize()
+premium_initialize()
 st.set_page_config(page_title='AI Academic Memory · Classroom Pilot', page_icon='🧠', layout='wide')
 st.markdown('''<style>
 :root {--gold:#c59a38;--ink:#101827;}
@@ -363,21 +381,23 @@ st.markdown('''<style>
 [data-testid="stSidebar"] {background:linear-gradient(175deg,#121820,#222b35);}
 [data-testid="stSidebar"] * {color:#f5f0e5!important;}
 [data-testid="stSidebar"] button {border:1px solid #c59a38!important;}
-.block-container {max-width:1200px;padding-top:1.6rem;padding-bottom:3rem;}
+.block-container {max-width:1280px;padding-top:1.6rem;padding-bottom:3rem;}
 h1,h2,h3 {letter-spacing:-.035em;color:#192435;}
 h1 {font-weight:850!important;}
 h2,h3 {font-weight:750!important;}
 [data-testid="stMetric"] {background:#fff;border:1px solid #e9e7e0;border-top:3px solid #c59a38;border-radius:16px;padding:18px;box-shadow:0 6px 25px #17203309;}
 [data-testid="stExpander"], [data-testid="stForm"], [data-testid="stVerticalBlockBorderWrapper"] {border-radius:14px!important;}
 .stButton button[kind="primary"],button[data-testid="stBaseButton-primary"] {background:#bb8d2d!important;border-color:#bb8d2d!important;color:#fff!important;border-radius:10px!important;}
-.stButton button {border-radius:10px;}
+.stButton button {border-radius:10px;transition:transform .15s ease,box-shadow .15s ease;} .stButton button:hover {transform:translateY(-1px);box-shadow:0 4px 14px #10182018;} @media(max-width:640px){.block-container{padding-left:1rem;padding-right:1rem;padding-top:.8rem}.hero-gold{padding:17px;border-radius:14px}[data-testid="stMetric"]{padding:11px}}
+[data-testid="stTextInput"] input,[data-testid="stTextArea"] textarea {border-radius:12px!important;}
+@media(max-width:640px){[data-testid="stHorizontalBlock"]{flex-wrap:wrap!important;}[data-testid="stColumn"]{min-width: min(100%,250px)!important;flex:1 1 100%!important;} .stButton button{min-height:42px}}
 [data-testid="stTabs"] button[aria-selected="true"] {color:#ae8129!important;border-bottom-color:#ae8129!important;}
 .hero-gold {padding:24px 28px;border-radius:20px;background:linear-gradient(105deg,#101820,#28313c);color:white;margin-bottom:22px;box-shadow:0 12px 30px #10182025;}
 .hero-gold strong {color:#edc66e;}
 .hero-gold p {color:#e3e6eb;margin:8px 0 0;}
 </style>''', unsafe_allow_html=True)
 st.title('🎓 AI Academic Memory')
-st.caption('Pilot build: GEMINI-PITCH-2026-10-30')
+st.caption('Premium Edition · Your academic life, organized')
 st.markdown('<div class="hero-gold"><strong>YOUR CLASS. YOUR KNOWLEDGE.</strong><p>Announcements • Academic materials • AI search • Deadline reminders</p></div>', unsafe_allow_html=True)
 
 if 'user_id' not in st.session_state:
@@ -575,6 +595,69 @@ with st.expander('📅 Academic calendar'):
     if not future: st.info('No upcoming dated announcements.')
     for r in sorted(future,key=lambda x:x['deadline']):
         st.write(f'**{r["deadline"]}** · {r["course"]} · {r["category"]}')
+# Personal dashboard and academic productivity tools
+with st.expander('⭐ My saved announcements'):
+    with connect() as c:
+        saved=c.execute('SELECT a.id,a.course,a.category,a.message FROM announcement_bookmarks b JOIN announcements a ON a.id=b.announcement_id WHERE b.user_id=? AND a.class_id=? AND a.deleted_at IS NULL ORDER BY a.id DESC',(user['id'],class_id)).fetchall()
+    if not saved: st.caption('Bookmark an announcement below to save it here.')
+    for item in saved:
+        st.markdown(f"**{item['course']} · {item['category']}**")
+        st.write(item['message'])
+        if st.button('Remove bookmark',key=f"unsave_{item['id']}"):
+            with connect() as c: c.execute('DELETE FROM announcement_bookmarks WHERE user_id=? AND announcement_id=?',(user['id'],item['id']))
+            st.rerun()
+with st.expander('✅ My study planner',expanded=False):
+    with st.form('add_personal_task',clear_on_submit=True):
+        task_title=st.text_input('Task',placeholder='Revise CHE 251 chapter 3',max_chars=180)
+        task_date=st.date_input('Target date',value=None)
+        task_add=st.form_submit_button('Add task')
+    if task_add:
+        if not task_title.strip(): st.warning('Enter a task.')
+        else:
+            with connect() as c:
+                c.execute('INSERT INTO student_tasks(user_id,class_id,title,due_date) VALUES(?,?,?,?)',(user['id'],class_id,task_title.strip(),task_date.isoformat() if task_date else None))
+            st.rerun()
+    with connect() as c:
+        tasks=c.execute('SELECT * FROM student_tasks WHERE user_id=? AND class_id=? ORDER BY completed ASC,due_date ASC NULLS LAST,id DESC LIMIT 100',(user['id'],class_id)).fetchall()
+    for task in tasks:
+        col1,col2=st.columns([5,1])
+        with col1:
+            checked=st.checkbox(f"{task['title']}"+(f" · {task['due_date']}" if task['due_date'] else ''),value=bool(task['completed']),key=f"task_{task['id']}")
+            if checked!=bool(task['completed']):
+                with connect() as c: c.execute('UPDATE student_tasks SET completed=? WHERE id=? AND user_id=? AND class_id=?',(checked,task['id'],user['id'],class_id))
+                st.rerun()
+        with col2:
+            if st.button('Remove',key=f"task_del_{task['id']}"):
+                with connect() as c: c.execute('DELETE FROM student_tasks WHERE id=? AND user_id=? AND class_id=?',(task['id'],user['id'],class_id))
+                st.rerun()
+with st.expander('🗓️ Weekly class timetable',expanded=False):
+    days=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+    with connect() as c:
+        timetable=c.execute('SELECT * FROM class_timetable WHERE class_id=? ORDER BY weekday,start_time',(class_id,)).fetchall()
+    for item in timetable:
+        x,y=st.columns([5,1])
+        with x: st.write(f"**{days[item['weekday']]} {item['start_time']}–{item['end_time']}** · {item['course']} · {item['venue']}"+(f" · {item['notes']}" if item['notes'] else ''))
+        with y:
+            if is_rep and st.button('Remove',key=f"tt_del_{item['id']}"):
+                with connect() as c: c.execute('DELETE FROM class_timetable WHERE id=? AND class_id=?',(item['id'],class_id))
+                st.rerun()
+    if not timetable: st.info('No timetable entries have been added yet.')
+    if is_rep:
+        with st.form('new_timetable',clear_on_submit=True):
+            t_course=st.text_input('Course code',max_chars=30)
+            t_day=st.selectbox('Day',range(7),format_func=lambda n:days[n])
+            t_start=st.time_input('Start time',value=datetime.strptime('08:00','%H:%M').time())
+            t_end=st.time_input('End time',value=datetime.strptime('10:00','%H:%M').time())
+            t_venue=st.text_input('Venue',max_chars=120)
+            t_notes=st.text_input('Notes',max_chars=300)
+            t_save=st.form_submit_button('Add class session')
+        if t_save:
+            if not t_course.strip() or t_end<=t_start: st.error('Enter a course and an end time later than the start time.')
+            else:
+                with connect() as c:
+                    c.execute('INSERT INTO class_timetable(class_id,course,weekday,start_time,end_time,venue,notes,created_by) VALUES(?,?,?,?,?,?,?,?)',(class_id,t_course.strip().upper(),t_day,t_start.strftime('%H:%M'),t_end.strftime('%H:%M'),t_venue.strip(),t_notes.strip(),user['id']))
+                st.rerun()
+
 if is_rep:
     st.code(active['join_code'], language=None)
     st.caption('Share this join code only with students in your class.')
@@ -638,10 +721,70 @@ if is_rep:
 else:
     st.caption('Only class representatives can publish announcements in this pilot.')
 
+# Announcement management: only authorized class representatives can change class records.
+if is_rep:
+    st.divider()
+    st.subheader('🛠️ Manage announcements')
+    st.caption('Edit, pin, delete, or restore class announcements. Deletions are recoverable and recorded in the audit history.')
+    with connect() as c:
+        managed = c.execute('SELECT * FROM announcements WHERE class_id=? ORDER BY id DESC LIMIT 200', (class_id,)).fetchall()
+    show_deleted = st.checkbox('Show deleted announcements', key=f'show_deleted_{class_id}')
+    visible_managed = [r for r in managed if bool(r['deleted_at']) == show_deleted]
+    if not visible_managed:
+        st.info('No announcements in this view.')
+    for record in visible_managed:
+        rid = record['id']
+        with st.expander(f"#{rid} · {record['course']} · {record['category']}" + (' · DELETED' if record['deleted_at'] else '')):
+            st.write(record['message'])
+            st.caption(f"Recorded: {record['created_at']}")
+            if record['deleted_at']:
+                if st.button('↩ Restore announcement', key=f'restore_ann_{rid}'):
+                    with connect() as c:
+                        c.execute('UPDATE announcements SET deleted_at=NULL,updated_at=NOW() WHERE id=? AND class_id=? AND deleted_at IS NOT NULL', (rid,class_id))
+                        c.execute('INSERT INTO announcement_audit(announcement_id,class_id,actor_id,action) VALUES(?,?,?,?)',(rid,class_id,user['id'],'restore'))
+                    st.success('Announcement restored.')
+                    st.rerun()
+            else:
+                with st.form(f'edit_announcement_{rid}'):
+                    new_course = st.text_input('Course', value=record['course'], key=f'course_{rid}')
+                    new_category = st.selectbox('Category', CATEGORIES, index=CATEGORIES.index(record['category']) if record['category'] in CATEGORIES else len(CATEGORIES)-1, key=f'category_{rid}')
+                    new_deadline = st.text_input('Date (YYYY-MM-DD, optional)', value=record['deadline'] or '', key=f'date_{rid}')
+                    new_message = st.text_area('Announcement', value=record['message'], key=f'message_{rid}')
+                    new_pinned = st.checkbox('Pin to top', value=bool(record['pinned']), key=f'pin_{rid}')
+                    save_changes = st.form_submit_button('Save changes')
+                if save_changes:
+                    try:
+                        if new_deadline.strip(): date.fromisoformat(new_deadline.strip())
+                        if not new_course.strip() or not new_message.strip(): raise ValueError('Course and announcement cannot be empty.')
+                        old = {k:record[k] for k in ('course','category','deadline','message','pinned')}
+                        new = {'course':new_course.strip().upper(),'category':new_category,'deadline':new_deadline.strip() or None,'message':new_message.strip(),'pinned':new_pinned}
+                        if old != new:
+                            with connect() as c:
+                                c.execute('UPDATE announcements SET course=?,category=?,deadline=?,message=?,pinned=?,updated_at=NOW() WHERE id=? AND class_id=? AND deleted_at IS NULL', (new['course'],new['category'],new['deadline'],new['message'],new['pinned'],rid,class_id))
+                                c.execute('INSERT INTO announcement_audit(announcement_id,class_id,actor_id,action,old_values,new_values) VALUES(?,?,?,?,?,?)',(rid,class_id,user['id'],'edit',json.dumps(old),json.dumps(new)))
+                            st.success('Changes saved. Previously sent emails cannot be recalled; publish a correction if needed.')
+                            st.rerun()
+                        else: st.info('No changes to save.')
+                    except ValueError as exc:
+                        st.error(f'Please enter a valid YYYY-MM-DD date and nonempty fields. {exc}')
+                confirm_delete = st.checkbox('I confirm this announcement should be removed from student views',key=f'confirm_delete_{rid}')
+                if st.button('🗑️ Delete announcement', key=f'delete_ann_{rid}', disabled=not confirm_delete):
+                    with connect() as c:
+                        c.execute('UPDATE announcements SET deleted_at=NOW(),updated_at=NOW() WHERE id=? AND class_id=? AND deleted_at IS NULL',(rid,class_id))
+                        c.execute('INSERT INTO announcement_audit(announcement_id,class_id,actor_id,action) VALUES(?,?,?,?)',(rid,class_id,user['id'],'delete'))
+                    st.success('Announcement removed from student views. You can restore it.')
+                    st.rerun()
+    with st.expander('📜 Announcement change history'):
+        with connect() as c:
+            history = c.execute('SELECT announcement_id,action,actor_id,created_at FROM announcement_audit WHERE class_id=? ORDER BY id DESC LIMIT 50',(class_id,)).fetchall()
+        for h in history:
+            st.caption(f"Announcement #{h['announcement_id']} · {h['action']} · User #{h['actor_id']} · {h['created_at']}")
+        if not history: st.info('No changes recorded yet.')
+
 st.divider()
 st.subheader('⚠️ Possible changes requiring confirmation')
 with connect() as c:
-    links=c.execute("""SELECT l.id link_id,l.status,a.message old_message,a.deadline old_date,b.message new_message,b.deadline new_date,b.course,b.category FROM memory_links l JOIN announcements a ON a.id=l.older_id JOIN announcements b ON b.id=l.newer_id WHERE l.status='Needs review' AND a.class_id=? AND b.class_id=? ORDER BY l.id DESC""",(class_id,class_id)).fetchall()
+    links=c.execute("""SELECT l.id link_id,l.status,a.message old_message,a.deadline old_date,b.message new_message,b.deadline new_date,b.course,b.category FROM memory_links l JOIN announcements a ON a.id=l.older_id JOIN announcements b ON b.id=l.newer_id WHERE l.status='Needs review' AND a.class_id=? AND b.class_id=? AND a.deleted_at IS NULL AND b.deleted_at IS NULL ORDER BY l.id DESC""",(class_id,class_id)).fetchall()
 if not links: st.info('No possible deadline conflicts awaiting review.')
 for item in links:
     with st.expander(f"{item['course']} · {item['category']} · {item['old_date']} versus {item['new_date']}"):
@@ -664,7 +807,7 @@ reminder_window=st.selectbox('Show deadlines within', [1,3,7,14,30], index=[1,3,
 with connect() as c:
     c.execute('INSERT INTO reminder_preferences(user_id,days_ahead) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET days_ahead=excluded.days_ahead',(user['id'],reminder_window))
     dismissed={r['announcement_id'] for r in c.execute('SELECT announcement_id FROM reminder_dismissals WHERE user_id=?',(user['id'],)).fetchall()}
-    dated=c.execute('SELECT * FROM announcements WHERE class_id=? AND deadline IS NOT NULL ORDER BY deadline ASC, id DESC',(class_id,)).fetchall()
+    dated=c.execute('SELECT * FROM announcements WHERE class_id=? AND deleted_at IS NULL AND deadline IS NOT NULL ORDER BY deadline ASC, id DESC',(class_id,)).fetchall()
     conflicts={r['id'] for r in c.execute("SELECT older_id id FROM memory_links WHERE status='Needs review' UNION SELECT newer_id id FROM memory_links WHERE status='Needs review'").fetchall()}
 upcoming=[]
 for record in dated:
@@ -757,18 +900,29 @@ for r in filtered:
     with st.expander(f"#{r['id']} · {r['course']} · {r['category']} · {r['deadline'] or 'Date not specified'}"):
         st.write(r['message'])
         st.caption(f"Source #{r['id']} · Recorded {r['created_at']}")
+        if st.button('⭐ Save / unsave',key=f"bookmark_{r['id']}"):
+            with connect() as c:
+                found=c.execute('SELECT 1 FROM announcement_bookmarks WHERE user_id=? AND announcement_id=?',(user['id'],r['id'])).fetchone()
+                if found: c.execute('DELETE FROM announcement_bookmarks WHERE user_id=? AND announcement_id=?',(user['id'],r['id']))
+                else: c.execute('INSERT INTO announcement_bookmarks(user_id,announcement_id) VALUES(?,?) ON CONFLICT DO NOTHING',(user['id'],r['id']))
+            st.rerun()
 if not filtered: st.info('No announcements found for this class.')
 
 st.divider()
 st.subheader('🤖 Ask your AI academic assistant')
 question=st.text_input('Ask about class announcements',placeholder='When is CHE 251 assignment due?')
-if st.button('Search class memory'):
+if st.button('Search class memory') or st.session_state.pop('fallback_search',None):
     if not question.strip(): st.warning('Enter a question first.')
     elif api_key:
         try:
             with st.spinner('Searching class memory...'):
                 st.markdown(ai_answer(question,records,api_key,model))
-        except Exception as e: st.error(str(e))
+        except Exception:
+            st.warning('AI provider unavailable. Showing matching verified class records instead.')
+            words=[w for w in re.findall(r'[a-z]{4,}',question.lower()) if len(w)>3]
+            matches=[r for r in records if any(w in (r['course']+' '+r['message']).lower() for w in words)]
+            for r in matches[:10]: st.write(f"Source #{r['id']}: {r['message']}")
+            if not matches: st.info('No matching verified records found.')
     else:
         match=re.search(r'\b[A-Za-z]{2,4}\s?\d{3}\b',question)
         if match:
