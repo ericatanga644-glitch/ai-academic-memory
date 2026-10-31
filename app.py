@@ -399,6 +399,38 @@ def prepare_database_schema_once():
         c.execute("CREATE INDEX IF NOT EXISTS idx_email_preferences_user ON email_preferences(user_id)")
     return True
 
+def academic_memory_answer(question, records):
+    """Source-grounded retrieval; never invent dates or academic facts."""
+    q = question.lower().strip()
+    course_match = re.search(r'\b([a-z]{2,4})\s*[- ]?\s*(\d{3})\b', q)
+    course = f'{course_match.group(1).upper()} {course_match.group(2)}' if course_match else None
+    deadline_intent = any(w in q for w in ('due', 'deadline', 'submit', 'submission', 'assignment', 'homework', 'quiz', 'test'))
+    cancellation_intent = any(w in q for w in ('cancel', 'called off', 'postpon', 'reschedul'))
+    material_intent = any(w in q for w in ('slide', 'pdf', 'material', 'note', 'document'))
+    candidates = [r for r in records if not course or re.sub(r'\s+', ' ', str(r['course']).upper().strip()) == course]
+    if deadline_intent:
+        candidates = [r for r in candidates if any(w in (str(r['category'])+' '+str(r['message'])).lower() for w in ('assignment','deadline','submit','submission','quiz','test','due'))]
+    elif cancellation_intent:
+        candidates = [r for r in candidates if any(w in str(r['message']).lower() for w in ('cancel','postpon','reschedul','called off'))]
+    elif material_intent:
+        candidates = [r for r in candidates if any(w in (str(r['category'])+' '+str(r['message'])).lower() for w in ('slide','pdf','material','note','document'))]
+    else:
+        stop={'when','what','where','which','about','please','tell','show','does','have','with','from','your','there','class','course','latest','recent','information'}
+        terms=[w for w in re.findall(r'[a-z]{4,}',q) if w not in stop]
+        if terms:
+            candidates=[r for r in candidates if any(w in (str(r['message'])+' '+str(r['category'])).lower() for w in terms)]
+    if not candidates:
+        topic = 'assignment/deadline' if deadline_intent else 'cancellation' if cancellation_intent else 'material' if material_intent else 'information'
+        return f'No verified {topic} record found'+(f' for {course}' if course else '')+'.', []
+    candidates=sorted(candidates,key=lambda r:r['id'],reverse=True)
+    if deadline_intent:
+        dated=[r for r in candidates if r['deadline']]
+        if dated:
+            top=dated[0]
+            return f"Latest recorded deadline: {top['deadline']} ({top['course']}). Check the original source for context.", candidates[:5]
+        return 'Relevant assignment records were found, but no verified deadline date is recorded.', candidates[:5]
+    return f'{len(candidates)} matching verified record(s) found. Review the original announcement(s) below.', candidates[:5]
+
 prepare_database_schema_once()
 st.set_page_config(page_title='AI Academic Memory · Classroom Pilot', page_icon='🧠', layout='wide')
 st.markdown('''<style>
@@ -421,6 +453,30 @@ h2,h3 {font-weight:750!important;}
 .hero-gold {padding:24px 28px;border-radius:20px;background:linear-gradient(105deg,#101820,#28313c);color:white;margin-bottom:22px;box-shadow:0 12px 30px #10182025;}
 .hero-gold strong {color:#edc66e;}
 .hero-gold p {color:#e3e6eb;margin:8px 0 0;}
+
+/* Premium responsive refinement: accessibility, touch targets, and compact layouts */
+:root {color-scheme:light;}
+[data-testid="stAppViewContainer"] {font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;}
+[data-testid="stExpander"] {background:#ffffffd9;box-shadow:0 3px 16px #1720330a;border:1px solid #e8e7e1!important;}
+[data-testid="stMetricValue"] {font-weight:800;letter-spacing:-.04em;}
+[data-testid="stForm"] {background:#ffffffb8;padding:1rem;border:1px solid #eae6d9;}
+button, input, select, textarea {touch-action:manipulation;}
+button:focus-visible,input:focus-visible {outline:3px solid #c59a38!important;outline-offset:2px;}
+@media(max-width:760px){
+  .block-container {padding:0.7rem .85rem 4rem!important;}
+  h1 {font-size:1.8rem!important;line-height:1.16!important;}
+  h2 {font-size:1.4rem!important;}
+  h3 {font-size:1.16rem!important;}
+  .hero-gold {padding:18px 16px!important;margin-bottom:14px!important;}
+  [data-testid="stHorizontalBlock"] {gap:.65rem!important;}
+  [data-testid="stMetric"] {padding:12px!important;}
+  [data-testid="stMetricValue"] {font-size:1.5rem!important;}
+  .stButton button {min-height:46px!important;width:100%;}
+  [data-testid="stExpander"] {margin-bottom:.35rem;}
+  [data-testid="stTextInput"] input {min-height:44px;}
+  [data-testid="stSidebar"] {min-width: min(85vw,310px)!important;}
+}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;}}
 </style>''', unsafe_allow_html=True)
 st.title('🎓 AI Academic Memory')
 st.caption('Premium Edition · Your academic life, organized')
@@ -607,6 +663,17 @@ a,b,c=st.columns(3)
 a.metric('📢 Announcements',len(records))
 b.metric('🔔 Unread updates',len(unread))
 c.metric('📅 Upcoming deadlines',len(future))
+st.caption('Your academic overview · verified class information')
+with st.container(border=True):
+    st.markdown('#### ⚡ Quick overview')
+    if future:
+        next_item=min(future,key=lambda x:x['deadline'])
+        st.markdown(f"**Next recorded deadline:** {next_item['course']} · {next_item['deadline']}")
+    else:
+        st.caption('No upcoming verified deadlines recorded.')
+    if unread:
+        st.markdown(f"**Latest unread:** {unread[0]['course']} · {unread[0]['category']}")
+    st.caption('Use the sections below to manage your notifications, study tasks, materials, and academic search.')
 with st.expander(f'🔔 Notification centre · {len(unread)} unread',expanded=bool(unread)):
     if not unread: st.success('You are all caught up!')
     for r in unread[:15]:
@@ -687,7 +754,7 @@ with st.expander('🗓️ Weekly class timetable',expanded=False):
 if is_rep:
     st.code(active['join_code'], language=None)
     st.caption('Share this join code only with students in your class.')
-st.info(('AI is configured: Gemini.' if secret('GEMINI_API_KEY').strip() else 'AI is configured: OpenAI.') if api_key else 'Rule-based search is available; AI is not configured yet. Set GEMINI_API_KEY in this Streamlit app Secrets, then reboot.')
+st.info(('AI is configured: Gemini.' if secret('GEMINI_API_KEY').strip() else 'AI is configured: OpenAI.') if api_key else 'Verified academic search is available without an AI API key.')
 
 if is_rep:
     feedback = st.session_state.pop('publish_feedback', None)
@@ -950,14 +1017,9 @@ if st.button('Search class memory') or st.session_state.pop('fallback_search',No
             for r in matches[:10]: st.write(f"Source #{r['id']}: {r['message']}")
             if not matches: st.info('No matching verified records found.')
     else:
-        match=re.search(r'\b[A-Za-z]{2,4}\s?\d{3}\b',question)
-        if match:
-            target=re.sub(r'\s+',' ',match.group()).upper()
-            results=[r for r in records if r['course']==target]
-        else:
-            words=[w for w in re.findall(r'[a-z]{4,}',question.lower()) if w not in {'when','what','where','which','about','please','tell','show','does','have','with','from','your','there'}]
-            results=[r for r in records if any(w in r['message'].lower() for w in words)]
-        if results:
-            st.info('Matching saved sources (not an AI-generated answer):')
-            for r in results[:10]: st.write(f"Source #{r['id']}: {r['message']}")
-        else: st.info('No supporting class records found.')
+        answer, supporting = academic_memory_answer(question, records)
+        st.info(answer)
+        for r in supporting:
+            with st.expander(f"Verified source #{r['id']} · {r['course']} · {r['category']}"):
+                st.write(r['message'])
+                st.caption(f"Recorded deadline: {r['deadline'] or 'Not specified'}")
