@@ -7,6 +7,7 @@ import sqlite3
 import psycopg
 from psycopg.rows import dict_row
 from psycopg import errors as pg_errors
+from psycopg_pool import ConnectionPool
 import secrets
 import hashlib
 import hmac
@@ -33,16 +34,31 @@ if not DATABASE_URL:
     st.error('DATABASE_URL is missing. Configure it in Streamlit app secrets before deploying.')
     st.stop()
 
+@st.cache_resource(show_spinner=False)
+def database_pool():
+    """One shared, bounded pool per Streamlit server process."""
+    return ConnectionPool(
+        conninfo=DATABASE_URL,
+        min_size=0,
+        max_size=5,
+        timeout=12,
+        max_idle=120,
+        kwargs={'row_factory': dict_row, 'connect_timeout': 10},
+        open=True,
+    )
+
 class DBConn:
     def __init__(self):
-        self.raw = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
+        self.pool = database_pool()
+        self.raw = self.pool.getconn(timeout=12)
         self.lastrowid = None
     def __enter__(self): return self
     def __exit__(self, typ, val, tb):
         try:
             if typ is None: self.raw.commit()
             else: self.raw.rollback()
-        finally: self.raw.close()
+        finally:
+            self.pool.putconn(self.raw)
     def execute(self, sql, params=()):
         sql=sql.replace('INSERT OR IGNORE INTO', 'INSERT INTO')
         sql=sql.replace('?', '%s')
@@ -369,11 +385,21 @@ def get_memberships(user_id):
     with connect() as c:
         return c.execute('SELECT cl.*, m.role FROM classes cl JOIN memberships m ON m.class_id=cl.id WHERE m.user_id=? ORDER BY cl.id DESC', (user_id,)).fetchall()
 
-phase4_initialize()
-phase6_initialize()
-notification_initialize()
-materials_initialize()
-premium_initialize()
+@st.cache_resource(show_spinner=False)
+def prepare_database_schema_once():
+    """DDL is server initialization, not a per-click operation."""
+    phase4_initialize()
+    phase6_initialize()
+    notification_initialize()
+    materials_initialize()
+    premium_initialize()
+    with connect() as c:
+        c.execute("CREATE INDEX IF NOT EXISTS idx_announcements_class_live ON announcements(class_id, id DESC) WHERE deleted_at IS NULL")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_memberships_class ON memberships(class_id, user_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_email_preferences_user ON email_preferences(user_id)")
+    return True
+
+prepare_database_schema_once()
 st.set_page_config(page_title='AI Academic Memory · Classroom Pilot', page_icon='🧠', layout='wide')
 st.markdown('''<style>
 :root {--gold:#c59a38;--ink:#101827;}
