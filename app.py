@@ -330,18 +330,39 @@ def send_immediate_announcement_emails(announcement_id, class_id, publisher_id, 
     body += '\nSign in to AI Academic Memory to view the original announcement.\n'
     sent, failed = 0, 0
     failure_categories = set()
-    for recipient in recipients:
-        try:
-            smtp_send(recipient['notification_email'], subject, body, smtp_settings())
-            with connect() as c:
-                c.execute("""INSERT INTO email_delivery_log(user_id,announcement_id,event_type,sent_at)
-                    VALUES(?,?,?,?) ON CONFLICT DO NOTHING""",
-                    (recipient['user_id'],announcement_id,'announcement',datetime.utcnow().isoformat()))
-            sent += 1
-        except Exception as exc:
-            failed += 1
-            failure_categories.add(safe_email_error_category(exc))
-            logging.warning('Immediate announcement email failed: %s', safe_email_error_category(exc))
+    # One SMTP handshake/login for the batch instead of one per student.
+    # Keep per-recipient delivery logs to support worker deduplication.
+    host, port, username, password, sender = smtp_settings()
+    try:
+        if port == 465:
+            client = smtplib.SMTP_SSL(host, port, context=ssl.create_default_context(), timeout=15)
+        else:
+            client = smtplib.SMTP(host, port, timeout=15)
+        with client:
+            if port != 465:
+                client.starttls(context=ssl.create_default_context())
+            client.login(username, password)
+            with connect() as log_conn:
+                for recipient in recipients:
+                    try:
+                        msg = EmailMessage()
+                        msg['From'] = sender
+                        msg['To'] = recipient['notification_email']
+                        msg['Subject'] = subject
+                        msg.set_content(body)
+                        client.send_message(msg)
+                        log_conn.execute("""INSERT INTO email_delivery_log(user_id,announcement_id,event_type,sent_at)
+                            VALUES(?,?,?,?) ON CONFLICT DO NOTHING""",
+                            (recipient['user_id'], announcement_id, 'announcement', datetime.utcnow().isoformat()))
+                        sent += 1
+                    except Exception as exc:
+                        failed += 1
+                        failure_categories.add(safe_email_error_category(exc))
+                        logging.warning('Immediate announcement email failed: %s', safe_email_error_category(exc))
+    except Exception as exc:
+        failed += max(0, len(recipients) - sent - failed)
+        failure_categories.add(safe_email_error_category(exc))
+        logging.warning('Announcement email batch failed: %s', safe_email_error_category(exc))
     note = (f'{failed} delivery attempt(s) failed. Cause: {"; ".join(sorted(failure_categories))}. '
             'The scheduled worker may retry.' if failed else '')
     return sent, note
@@ -366,11 +387,17 @@ def get_memberships(user_id):
     with connect() as c:
         return c.execute('SELECT cl.*, m.role FROM classes cl JOIN memberships m ON m.class_id=cl.id WHERE m.user_id=? ORDER BY cl.id DESC', (user_id,)).fetchall()
 
-try:
+@st.cache_resource(show_spinner=False)
+def initialize_database_once(database_url):
+    # DDL is a deployment/startup task, not work for every widget interaction.
     phase4_initialize()
     phase6_initialize()
     notification_initialize()
     materials_initialize()
+    return True
+
+try:
+    initialize_database_once(DATABASE_URL)
 except psycopg.Error:
     logging.exception('Database initialization failed')
     st.title('AI Academic Memory')
