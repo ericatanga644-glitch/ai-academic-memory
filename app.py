@@ -13,6 +13,8 @@ import hmac
 import smtplib
 import logging
 import ssl
+import time
+import html
 from email.message import EmailMessage
 from datetime import timedelta
 from datetime import datetime, date
@@ -28,6 +30,8 @@ def secret(name, default=''):
     except Exception:
         return str(os.environ.get(name, default)).strip()
 
+st.set_page_config(page_title='AI Academic Memory · Classroom Pilot', page_icon='🧠', layout='wide')
+
 DATABASE_URL = secret('DATABASE_URL')
 if not DATABASE_URL:
     st.error('DATABASE_URL is missing. Configure it in Streamlit app secrets before deploying.')
@@ -35,7 +39,17 @@ if not DATABASE_URL:
 
 class DBConn:
     def __init__(self):
-        self.raw = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
+        last_error = None
+        for attempt in range(3):
+            try:
+                self.raw = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=8)
+                break
+            except psycopg.OperationalError as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+        else:
+            raise last_error
         self.lastrowid = None
     def __enter__(self): return self
     def __exit__(self, typ, val, tb):
@@ -120,6 +134,39 @@ def extract(message):
     return course, category, day
 
 def ai_request(messages, key, model, json_mode=False):
+    """Use Gemini when configured; otherwise retain the existing OpenAI integration."""
+    if secret('GEMINI_API_KEY').strip():
+        system_text = '\n'.join(m['content'] for m in messages if m['role'] == 'system')
+        contents = [{'role': 'model' if m['role'] == 'assistant' else 'user',
+                     'parts': [{'text': m['content']}]}
+                    for m in messages if m['role'] != 'system']
+        payload = {'contents': contents,
+                   'generationConfig': {'temperature': 0}}
+        if system_text:
+            payload['systemInstruction'] = {'parts': [{'text': system_text}]}
+        if json_mode:
+            payload['generationConfig']['responseMimeType'] = 'application/json'
+        gemini_model = model if model.startswith('gemini-') else 'gemini-2.5-flash'
+        url = 'https://generativelanguage.googleapis.com/v1beta/models/' + gemini_model + ':generateContent'
+        req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'),
+            headers={'x-goog-api-key': secret('GEMINI_API_KEY').strip(),
+                     'Content-Type': 'application/json'}, method='POST')
+        try:
+            with urllib.request.urlopen(req, timeout=35) as resp:
+                result = json.load(resp)
+            parts = result.get('candidates', [{}])[0].get('content', {}).get('parts', [])
+            answer = ''.join(part.get('text', '') for part in parts)
+            if not answer:
+                raise RuntimeError('Gemini returned no text. Check model availability or safety filters.')
+            return answer
+        except urllib.error.HTTPError as e:
+            try:
+                detail = json.loads(e.read().decode()).get('error', {}).get('message', '')
+            except Exception:
+                detail = ''
+            raise RuntimeError(f'Gemini API HTTP {e.code}: {detail[:250]}') from None
+        except Exception as e:
+            raise RuntimeError(f'Gemini request failed: {str(e)[:250]}') from None
     payload = {'model': model, 'messages': messages, 'temperature': 0}
     if json_mode:
         payload['response_format'] = {'type': 'json_object'}
@@ -319,16 +366,24 @@ def get_memberships(user_id):
     with connect() as c:
         return c.execute('SELECT cl.*, m.role FROM classes cl JOIN memberships m ON m.class_id=cl.id WHERE m.user_id=? ORDER BY cl.id DESC', (user_id,)).fetchall()
 
-phase4_initialize()
-phase6_initialize()
-notification_initialize()
-materials_initialize()
-st.set_page_config(page_title='AI Academic Memory · Classroom Pilot', page_icon='🧠', layout='wide')
+try:
+    phase4_initialize()
+    phase6_initialize()
+    notification_initialize()
+    materials_initialize()
+except psycopg.Error:
+    logging.exception('Database initialization failed')
+    st.title('AI Academic Memory')
+    st.error('The academic service is temporarily unable to reach its database. Your account and saved materials have not been deleted by this error.')
+    st.info('Please try again shortly. If this continues, contact your class representative or the platform administrator.')
+    if st.button('Try again', type='primary'):
+        st.rerun()
+    st.stop()
 st.markdown('''<style>
 :root {--gold:#c59a38;--ink:#101827;}
 .stApp {background:linear-gradient(155deg,#f7f8fb 0%,#fff 60%,#fbf6e9 100%);color:#172033;}
 [data-testid="stSidebar"] {background:linear-gradient(175deg,#121820,#222b35);}
-[data-testid="stSidebar"] * {color:#f5f0e5!important;}
+[data-testid="stSidebar"] h1,[data-testid="stSidebar"] h2,[data-testid="stSidebar"] p {color:#f5f0e5!important;}
 [data-testid="stSidebar"] button {border:1px solid #c59a38!important;}
 .block-container {max-width:1200px;padding-top:1.6rem;padding-bottom:3rem;}
 h1,h2,h3 {letter-spacing:-.035em;color:#192435;}
@@ -342,9 +397,81 @@ h2,h3 {font-weight:750!important;}
 .hero-gold {padding:24px 28px;border-radius:20px;background:linear-gradient(105deg,#101820,#28313c);color:white;margin-bottom:22px;box-shadow:0 12px 30px #10182025;}
 .hero-gold strong {color:#edc66e;}
 .hero-gold p {color:#e3e6eb;margin:8px 0 0;}
+
+/* Accessible light controls on both desktop and mobile */
+[data-testid="stMetric"] *, [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {color:#172033!important;opacity:1!important;}
+[data-testid="stTextInput"] input, [data-testid="stNumberInput"] input,
+[data-testid="stTextArea"] textarea, [data-testid="stSelectbox"] input,
+[data-baseweb="select"] input, [data-baseweb="select"] > div,
+[data-baseweb="popover"] [role="listbox"], [role="option"] {
+  background-color:#fff!important;color:#172033!important;
+}
+[data-testid="stTextInput"] input::placeholder, [data-testid="stTextArea"] textarea::placeholder {color:#566276!important;opacity:1!important;}
+[data-testid="stWidgetLabel"] *, label, [data-testid="stMarkdownContainer"] p {opacity:1;}
+[data-testid="stSidebar"] [data-baseweb="select"] > div {background:#fff!important;}
+[data-testid="stSidebar"] [data-baseweb="select"] input,[data-testid="stSidebar"] [data-baseweb="select"] span {color:#172033!important;}
+@media(max-width:768px){
+ .block-container{padding:1rem .8rem 2rem!important;}
+ .hero-gold{padding:17px!important;border-radius:14px!important;margin-bottom:14px!important;}
+ [data-testid="stMetric"]{padding:12px!important;min-width:0;}
+ [data-testid="stMetricValue"]{font-size:1.7rem!important;}
+ h1{font-size:1.8rem!important;}
+ [data-testid="stHorizontalBlock"]{flex-wrap:wrap!important;}
+ [data-testid="column"]{min-width:140px!important;flex:1 1 140px!important;}
+}
+
+/* Student-facing light input theme: mobile Safari, Chrome and desktop. */
+.stApp [data-testid="stTextInput"] input,
+.stApp [data-testid="stTextArea"] textarea,
+.stApp [data-testid="stNumberInput"] input,
+.stApp [data-baseweb="input"] input,
+.stApp [data-baseweb="textarea"] textarea {
+  background-color:#ffffff !important;
+  color:#152235 !important;
+  -webkit-text-fill-color:#152235 !important;
+  caret-color:#152235 !important;
+  color-scheme:light !important;
+}
+.stApp [data-testid="stTextInput"] > div > div,
+.stApp [data-testid="stTextArea"] > div > div,
+.stApp [data-baseweb="select"] > div,
+.stApp [data-baseweb="input"] > div {
+  background:#ffffff !important;
+  color:#152235 !important;
+  border-color:#aeb8c5 !important;
+  color-scheme:light !important;
+}
+.stApp input::placeholder,.stApp textarea::placeholder {
+  color:#687588 !important;
+  -webkit-text-fill-color:#687588 !important;
+  opacity:1 !important;
+}
+.stApp [data-baseweb="select"] span,
+.stApp [data-baseweb="select"] input,
+.stApp [data-baseweb="select"] svg,
+.stApp [data-testid="stMetricValue"],
+.stApp [data-testid="stMetricLabel"] {color:#172033 !important;fill:#172033 !important;}
+.stApp [data-testid="stTextInput"] input:focus,
+.stApp [data-testid="stTextArea"] textarea:focus {outline:2px solid #c59a38 !important;outline-offset:1px;}
+/* BaseWeb renders dropdown menus in a portal outside the application container. */
+[data-baseweb="popover"],[data-baseweb="menu"], [role="listbox"],
+[data-baseweb="popover"] li,[role="option"] {
+  background:#ffffff !important;
+  color:#172033 !important;
+  color-scheme:light !important;
+}
+[data-baseweb="popover"] [aria-selected="true"], [role="option"][aria-selected="true"] {
+  background:#f5e9c9 !important;color:#172033 !important;
+}
+@media (max-width: 640px) {
+ .block-container {padding:1rem .85rem 2rem !important;}
+ .hero-gold {padding:16px !important;border-radius:12px !important;}
+ [data-testid="stMetric"] {padding:12px !important;}
+ .stApp input,.stApp textarea {font-size:16px !important;}
+}
 </style>''', unsafe_allow_html=True)
 st.title('🎓 AI Academic Memory')
-st.caption('Pilot build: EMAIL-DIAGNOSTICS-2026-10-30')
+st.caption('Pilot build: GEMINI-PITCH-2026-10-30')
 st.markdown('<div class="hero-gold"><strong>YOUR CLASS. YOUR KNOWLEDGE.</strong><p>Announcements • Academic materials • AI search • Deadline reminders</p></div>', unsafe_allow_html=True)
 
 if 'user_id' not in st.session_state:
@@ -409,10 +536,10 @@ with st.sidebar:
         st.rerun()
     st.divider()
     st.header('🤖 AI settings')
-    api_key = secret('OPENAI_API_KEY')
+    api_key = secret('GEMINI_API_KEY').strip() or secret('OPENAI_API_KEY').strip()
     st.caption('AI access is managed by the pilot organizer. Do not enter personal API keys.')
-    model = st.text_input('Model', value='gpt-4.1-mini')
-    st.caption('API calls may incur charges. Your key is only kept in the current Streamlit session.')
+    model = st.text_input('Model', value='gemini-2.5-flash' if secret('GEMINI_API_KEY').strip() else 'gpt-4.1-mini')
+    st.caption('Gemini is preferred when GEMINI_API_KEY is configured. Free-tier limits may apply. Avoid submitting sensitive student data.')
 
 st.divider()
 st.subheader('📧 Email preferences')
@@ -523,7 +650,7 @@ with connect() as c:
     read_ids={r['announcement_id'] for r in c.execute('SELECT announcement_id FROM notification_reads WHERE user_id=?',(user['id'],)).fetchall()}
 unread=[r for r in records if r['id'] not in read_ids]
 future=[r for r in records if r['deadline'] and r['deadline'] >= date.today().isoformat()]
-st.markdown(f'### Welcome back, {user["name"].split()[0]} 👋')
+st.markdown('### Welcome back, ' + html.escape(user['name'].split()[0]) + ' 👋')
 a,b,c=st.columns(3)
 a.metric('📢 Announcements',len(records))
 b.metric('🔔 Unread updates',len(unread))
@@ -532,7 +659,7 @@ with st.expander(f'🔔 Notification centre · {len(unread)} unread',expanded=bo
     if not unread: st.success('You are all caught up!')
     for r in unread[:15]:
         with st.container(border=True):
-            st.markdown(f'**{r["course"]} · {r["category"]}**')
+            st.markdown('**' + html.escape(r['course']) + ' · ' + html.escape(r['category']) + '**')
             st.write(r['message'])
             if st.button('Mark as read',key=f'notif_{r["id"]}'):
                 with connect() as conn:
@@ -545,7 +672,7 @@ with st.expander('📅 Academic calendar'):
 if is_rep:
     st.code(active['join_code'], language=None)
     st.caption('Share this join code only with students in your class.')
-st.info('AI is available.' if api_key else 'Rule-based search is available; AI is not configured yet. Check OPENAI_API_KEY in the Secrets tab of THIS Streamlit app (ai-academic-memory-test), then reboot the app.')
+st.info(('AI is configured: Gemini.' if secret('GEMINI_API_KEY').strip() else 'AI is configured: OpenAI.') if api_key else 'Rule-based search is available; AI is not configured yet. Set GEMINI_API_KEY in this Streamlit app Secrets, then reboot.')
 
 if is_rep:
     feedback = st.session_state.pop('publish_feedback', None)
@@ -695,7 +822,7 @@ with connect() as c:
 st.caption(f'{len(material_rows)} matching materials · Maximum 100 displayed')
 for mat in material_rows:
     with st.container(border=True):
-        st.markdown(f'**{mat["course"]} · {mat["title"]}**')
+        st.markdown('**' + html.escape(mat['course']) + ' · ' + html.escape(mat['title']) + '**')
         if mat['description']: st.caption(mat['description'])
         st.caption(f'{mat["filename"]} · {mat["file_size"]/1024/1024:.2f} MB')
         left,right=st.columns([4,1])

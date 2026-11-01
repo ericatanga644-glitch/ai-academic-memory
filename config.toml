@@ -1,0 +1,14 @@
+# Student-facing Streamlit settings. Host-level error/sleep pages are outside this app.
+[client]
+toolbarMode = "viewer"
+showErrorDetails = "none"
+
+[ui]
+hideTopBar = true
+
+[theme]
+base = "light"
+primaryColor = "#B78A2D"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F7FA"
+textColor = "#172033"
