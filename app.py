@@ -833,7 +833,7 @@ for mat in material_rows:
             if st.button('Prepare download',key=f'mat_prepare_{mat["id"]}'):
                 st.session_state[f'mat_ready_{mat["id"]}']=True
         with right:
-            if is_rep and st.button('Delete',key=f'mat_delete_{mat["id"]}'):
+            if is_rep and st.button('Delete material',key=f'mat_delete_{mat["id"]}'):
                 with connect() as c:
                     c.execute('DELETE FROM academic_materials WHERE id=? AND class_id=?',(mat['id'],class_id))
                 st.session_state.pop(f'mat_ready_{mat["id"]}',None)
@@ -846,7 +846,7 @@ for mat in material_rows:
 if not material_rows: st.info('No matching materials yet. Class representatives can upload the first resource.')
 st.divider()
 st.subheader('📚 Announcements & search')
-records=all_records(class_id)
+# Reuse the announcements already fetched for this class during this run.
 query=st.text_input('Search this class',placeholder='CHE 251, assignment, deadline...')
 filtered=[r for r in records if query.lower() in ' '.join(str(r[k] or '') for k in ('course','category','deadline','message')).lower()]
 st.metric('Matching announcements',len(filtered))
@@ -854,6 +854,42 @@ for r in filtered:
     with st.expander(f"#{r['id']} · {r['course']} · {r['category']} · {r['deadline'] or 'Date not specified'}"):
         st.write(r['message'])
         st.caption(f"Source #{r['id']} · Recorded {r['created_at']}")
+        if is_rep:
+            with st.expander('Manage this announcement', expanded=False):
+                with st.form(f'edit_announcement_{r["id"]}'):
+                    updated_course = st.text_input('Course', value=r['course'], key=f'edit_course_{r["id"]}')
+                    updated_category = st.selectbox('Category', CATEGORIES, index=CATEGORIES.index(r['category']) if r['category'] in CATEGORIES else 0, key=f'edit_category_{r["id"]}')
+                    updated_deadline = st.text_input('Deadline (YYYY-MM-DD, optional)', value=r['deadline'] or '', key=f'edit_deadline_{r["id"]}')
+                    updated_message = st.text_area('Announcement', value=r['message'], key=f'edit_message_{r["id"]}')
+                    save_edit = st.form_submit_button('Save changes')
+                if save_edit:
+                    try:
+                        if updated_deadline.strip(): date.fromisoformat(updated_deadline.strip())
+                        if not updated_message.strip():
+                            st.error('Announcement cannot be empty.')
+                        else:
+                            with connect() as conn:
+                                # Check role server-side, not only by hiding buttons.
+                                conn.execute('''UPDATE announcements SET course=?,category=?,deadline=?,message=?
+                                    WHERE id=? AND class_id=? AND EXISTS
+                                    (SELECT 1 FROM memberships WHERE user_id=? AND class_id=? AND role='representative')''',
+                                    (updated_course.strip().upper() or 'Unspecified', updated_category,
+                                     updated_deadline.strip() or None, updated_message.strip(),r['id'],class_id,user['id'],class_id))
+                            st.success('Announcement updated.')
+                            st.rerun()
+                    except ValueError:
+                        st.error('Use YYYY-MM-DD for the deadline.')
+                confirm_delete = st.checkbox('I understand this permanently deletes this announcement', key=f'confirm_ann_{r["id"]}')
+                if st.button('Delete announcement', key=f'delete_ann_{r["id"]}', disabled=not confirm_delete):
+                    with connect() as conn:
+                        allowed = conn.execute("SELECT 1 FROM memberships WHERE user_id=? AND class_id=? AND role='representative'", (user['id'],class_id)).fetchone()
+                        if allowed:
+                            # Remove references first to avoid orphaned notifications and conflict links.
+                            conn.execute('DELETE FROM memory_links WHERE older_id=? OR newer_id=?', (r['id'],r['id']))
+                            conn.execute('DELETE FROM notification_reads WHERE announcement_id=?', (r['id'],))
+                            conn.execute('DELETE FROM reminder_dismissals WHERE announcement_id=?', (r['id'],))
+                            conn.execute('DELETE FROM announcements WHERE id=? AND class_id=?', (r['id'],class_id))
+                    st.rerun()
 if not filtered: st.info('No announcements found for this class.')
 
 st.divider()
