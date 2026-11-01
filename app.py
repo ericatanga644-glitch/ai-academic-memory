@@ -398,6 +398,10 @@ h2,h3 {font-weight:750!important;}
 .hero-gold strong {color:#edc66e;}
 .hero-gold p {color:#e3e6eb;margin:8px 0 0;}
 
+/* Hide app-level Streamlit developer controls where supported. Host overlays are not controlled by CSS. */
+[data-testid="stToolbar"], [data-testid="stMainMenu"],
+[data-testid="stDecoration"], #MainMenu, footer {display:none!important;}
+[data-testid="stSidebar"] button {color:#172033!important;background:#fff!important;}
 /* Accessible light controls on both desktop and mobile */
 [data-testid="stMetric"] *, [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {color:#172033!important;opacity:1!important;}
 [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input,
@@ -471,7 +475,7 @@ h2,h3 {font-weight:750!important;}
 }
 </style>''', unsafe_allow_html=True)
 st.title('🎓 AI Academic Memory')
-st.caption('Pilot build: GEMINI-PITCH-2026-10-30')
+st.caption('KNUST classroom pilot')
 st.markdown('<div class="hero-gold"><strong>YOUR CLASS. YOUR KNOWLEDGE.</strong><p>Announcements • Academic materials • AI search • Deadline reminders</p></div>', unsafe_allow_html=True)
 
 if 'user_id' not in st.session_state:
@@ -534,12 +538,11 @@ with st.sidebar:
         for key in ['user_id','pending']:
             st.session_state.pop(key,None)
         st.rerun()
-    st.divider()
-    st.header('🤖 AI settings')
-    api_key = secret('GEMINI_API_KEY').strip() or secret('OPENAI_API_KEY').strip()
-    st.caption('AI access is managed by the pilot organizer. Do not enter personal API keys.')
-    model = st.text_input('Model', value='gemini-2.5-flash' if secret('GEMINI_API_KEY').strip() else 'gpt-4.1-mini')
-    st.caption('Gemini is preferred when GEMINI_API_KEY is configured. Free-tier limits may apply. Avoid submitting sensitive student data.')
+
+# Model selection is server-side only. Never expose provider settings to students.
+api_key = secret('GEMINI_API_KEY') or secret('OPENAI_API_KEY')
+model = (secret('GEMINI_MODEL', 'gemini-2.5-flash') if secret('GEMINI_API_KEY')
+         else secret('OPENAI_MODEL', 'gpt-4.1-mini'))
 
 st.divider()
 st.subheader('📧 Email preferences')
@@ -672,7 +675,7 @@ with st.expander('📅 Academic calendar'):
 if is_rep:
     st.code(active['join_code'], language=None)
     st.caption('Share this join code only with students in your class.')
-st.info(('AI is configured: Gemini.' if secret('GEMINI_API_KEY').strip() else 'AI is configured: OpenAI.') if api_key else 'Rule-based search is available; AI is not configured yet. Set GEMINI_API_KEY in this Streamlit app Secrets, then reboot.')
+st.caption('Academic search is available.' if api_key else 'Academic search is available in standard mode.')
 
 if is_rep:
     feedback = st.session_state.pop('publish_feedback', None)

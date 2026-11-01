@@ -1,6 +1,6 @@
 # Student-facing Streamlit settings. Host-level error/sleep pages are outside this app.
 [client]
-toolbarMode = "viewer"
+toolbarMode = "minimal"
 showErrorDetails = "none"
 
 [ui]
