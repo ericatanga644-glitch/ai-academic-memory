@@ -338,7 +338,25 @@ h2,h3 {font-weight:750!important;}
 [data-testid="stExpander"], [data-testid="stForm"], [data-testid="stVerticalBlockBorderWrapper"] {border-radius:14px!important;}
 .stButton button[kind="primary"],button[data-testid="stBaseButton-primary"] {background:#bb8d2d!important;border-color:#bb8d2d!important;color:#fff!important;border-radius:10px!important;}
 .stButton button {border-radius:10px;}
-[data-testid="stTabs"] button[aria-selected="true"] {color:#ae8129!important;border-bottom-color:#ae8129!important;}
+[data-testid="stTabs"] button[aria-selected="true"] {color:#8a6419!important;border-bottom-color:#8a6419!important;}
+/* Mobile-friendly readable form controls, including Streamlit's BaseWeb inputs. */
+.stApp label, .stApp label p, .stApp [data-testid="stWidgetLabel"] p,
+.stApp [data-testid="stMarkdownContainer"] p {color:#243247!important;}
+.stApp input, .stApp textarea, .stApp [data-baseweb="select"] > div {
+  color:#172033!important;background:#ffffff!important;border-color:#9ca9b8!important;
+}
+.stApp input::placeholder, .stApp textarea::placeholder {color:#64748b!important;opacity:1!important;}
+.stApp [data-baseweb="select"] span {color:#172033!important;}
+.stApp [data-testid="stMetric"] label, .stApp [data-testid="stMetric"] [data-testid="stMetricValue"] {color:#172033!important;}
+.stApp [data-testid="stAlert"] p {color:#243247!important;}
+.auth-heading {font-size:1.12rem;font-weight:750;color:#172033;margin:1rem 0 .35rem;}
+@media(max-width:640px){
+  .block-container {padding:1rem 1rem 2.5rem!important;}
+  .hero-gold {padding:16px 18px;margin-bottom:14px;border-radius:14px;}
+  .stButton button {min-height:3rem;}
+  [data-testid="stForm"] {padding:1rem!important;}
+  h1 {font-size:1.85rem!important;}
+}
 .hero-gold {padding:24px 28px;border-radius:20px;background:linear-gradient(105deg,#101820,#28313c);color:white;margin-bottom:22px;box-shadow:0 12px 30px #10182025;}
 .hero-gold strong {color:#edc66e;}
 .hero-gold p {color:#e3e6eb;margin:8px 0 0;}
@@ -350,12 +368,24 @@ st.markdown('<div class="hero-gold"><strong>YOUR CLASS. YOUR KNOWLEDGE.</strong>
 if 'user_id' not in st.session_state:
     st.subheader('Welcome to Academic Memory')
     st.info('KNUST classroom pilot. Use the registration invitation code provided by your pilot organizer.')
-    signin, signup = st.tabs(['Sign in', 'Create student account'])
-    with signin:
+    # Two full-width, high-contrast actions replace hard-to-see mobile tabs.
+    if 'auth_view' not in st.session_state:
+        st.session_state.auth_view = 'signin'
+    left, right = st.columns(2, gap='small')
+    with left:
+        if st.button('🔐 SIGN IN', key='auth_signin', type='primary' if st.session_state.auth_view == 'signin' else 'secondary', use_container_width=True):
+            st.session_state.auth_view = 'signin'
+            st.rerun()
+    with right:
+        if st.button('➕ CREATE STUDENT ACCOUNT', key='auth_signup', type='primary' if st.session_state.auth_view == 'signup' else 'secondary', use_container_width=True):
+            st.session_state.auth_view = 'signup'
+            st.rerun()
+    if st.session_state.auth_view == 'signin':
+        st.markdown('<div class="auth-heading">Sign in to your account</div>', unsafe_allow_html=True)
         with st.form('login'):
             email = st.text_input('Email address').strip().lower()
             password = st.text_input('Password', type='password')
-            submit = st.form_submit_button('Sign in', type='primary')
+            submit = st.form_submit_button('Sign in', type='primary', use_container_width=True)
         if submit:
             attempts=st.session_state.get('login_attempts',0)
             if attempts >= 10:
@@ -370,28 +400,33 @@ if 'user_id' not in st.session_state:
                 st.rerun()
             else:
                 st.error('Invalid email or password.')
-    with signup:
+    else:
+        st.markdown('<div class="auth-heading">Create your student account</div>', unsafe_allow_html=True)
+        st.caption('Register once, then sign in and enter the separate class join code supplied by your class representative.')
         with st.form('register'):
             name = st.text_input('Full name')
             email_new = st.text_input('Email').strip().lower()
             programme = st.text_input('Programme', value='Petrochemical Engineering')
-            level = st.selectbox('Level', ['100','200','300','400','500','600'])
-            invite = st.text_input('Pilot registration invitation code', type='password')
+            level = st.selectbox('Level', ['100','200','300','400','500','600'], index=1)
+            invite = st.text_input('Pilot registration invitation code', type='password', help='This is the registration code, not your class join code.')
             pw = st.text_input('Password (minimum 10 characters)', type='password')
             pw2 = st.text_input('Confirm password', type='password')
-            register = st.form_submit_button('Create account')
+            register = st.form_submit_button('Create student account', type='primary', use_container_width=True)
         if register:
-            if not secret('PILOT_INVITE_CODE') or not hmac.compare_digest(invite, secret('PILOT_INVITE_CODE')):
-                st.error('Incorrect pilot invitation code.')
+            configured_code = secret('PILOT_INVITE_CODE')
+            if not configured_code:
+                st.error('Student registration is not configured. Ask the organizer to set PILOT_INVITE_CODE in this app’s Streamlit secrets.')
+            elif not hmac.compare_digest(invite, configured_code):
+                st.error('Incorrect pilot registration invitation code. Ask your class representative for the registration code (not the class join code).')
             elif not name.strip() or not valid_email(email_new) or not programme.strip() or len(pw)<10 or pw!=pw2:
                 st.error('Provide a name, valid email, programme and matching passwords of at least 10 characters.')
             else:
                 try:
                     with connect() as c:
                         c.execute('INSERT INTO users(name,email,password_hash,programme,level,created_at) VALUES(?,?,?,?,?,?)', (name.strip(),email_new,hash_password(pw),programme.strip(),level,datetime.now().isoformat(timespec='seconds')))
-                    st.success('Account created! Open the Sign in tab.')
+                    st.success('Student account created! Select SIGN IN above to log in, then join your class.')
                 except pg_errors.UniqueViolation:
-                    st.error('This email already has an account.')
+                    st.error('This email already has an account. Select SIGN IN above.')
     st.stop()
 
 with connect() as c:
