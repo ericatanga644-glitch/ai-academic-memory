@@ -500,6 +500,20 @@ h2,h3 {font-weight:750!important;}
  [data-testid="stMetric"] {padding:12px !important;}
  .stApp input,.stApp textarea {font-size:16px !important;}
 }
+
+/* Registration and login: readable labels and full-width buttons on phones. */
+.stApp [data-testid="stWidgetLabel"],
+.stApp [data-testid="stWidgetLabel"] *,
+.stApp [data-testid="stForm"] label,
+.stApp [data-testid="stForm"] label * {
+  color:#172033!important; opacity:1!important;
+  -webkit-text-fill-color:#172033!important;
+}
+.stApp [data-testid="stButton"] button {min-height:46px;font-weight:700;}
+@media (max-width:640px) {
+  .stApp [data-testid="stButton"] button {width:100%;white-space:normal;}
+  .stApp [data-testid="stForm"] {padding:12px!important;}
+}
 </style>''', unsafe_allow_html=True)
 st.title('🎓 AI Academic Memory')
 st.caption('KNUST classroom pilot')
@@ -508,8 +522,22 @@ st.markdown('<div class="hero-gold"><strong>YOUR CLASS. YOUR KNOWLEDGE.</strong>
 if 'user_id' not in st.session_state:
     st.subheader('Welcome to Academic Memory')
     st.info('KNUST classroom pilot. Use the registration invitation code provided by your pilot organizer.')
-    signin, signup = st.tabs(['Sign in', 'Create student account'])
-    with signin:
+    # Prominent, accessible navigation instead of low-contrast Streamlit tabs.
+    if 'auth_view' not in st.session_state:
+        st.session_state.auth_view = 'signin'
+    st.markdown('### Access your academic account')
+    if st.button('📝 CREATE STUDENT ACCOUNT', key='show_student_registration',
+                 type='primary' if st.session_state.auth_view == 'signup' else 'secondary',
+                 use_container_width=True):
+        st.session_state.auth_view = 'signup'
+        st.rerun()
+    if st.button('🔐 SIGN IN TO EXISTING ACCOUNT', key='show_student_login',
+                 type='primary' if st.session_state.auth_view == 'signin' else 'secondary',
+                 use_container_width=True):
+        st.session_state.auth_view = 'signin'
+        st.rerun()
+    if st.session_state.auth_view == 'signin':
+        st.markdown('#### Sign in')
         with st.form('login'):
             email = st.text_input('Email address').strip().lower()
             password = st.text_input('Password', type='password')
@@ -528,7 +556,9 @@ if 'user_id' not in st.session_state:
                 st.rerun()
             else:
                 st.error('Invalid email or password.')
-    with signup:
+    else:
+        st.markdown('#### Create your student account')
+        st.caption('Register first, then use the class join code after signing in.')
         with st.form('register'):
             name = st.text_input('Full name')
             email_new = st.text_input('Email').strip().lower()
@@ -547,7 +577,7 @@ if 'user_id' not in st.session_state:
                 try:
                     with connect() as c:
                         c.execute('INSERT INTO users(name,email,password_hash,programme,level,created_at) VALUES(?,?,?,?,?,?)', (name.strip(),email_new,hash_password(pw),programme.strip(),level,datetime.now().isoformat(timespec='seconds')))
-                    st.success('Account created! Open the Sign in tab.')
+                    st.success('Account created! Select SIGN IN TO EXISTING ACCOUNT above to log in.')
                 except pg_errors.UniqueViolation:
                     st.error('This email already has an account.')
     st.stop()
